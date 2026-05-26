@@ -175,7 +175,7 @@ export function ExportModal({ isOpen, onClose, slides, style, accent, watermark 
         const slideHtml = element.innerHTML;
 
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 1500);
+        const timeoutId = setTimeout(() => controller.abort(), 15000);
 
         try {
           const response = await fetch("http://localhost:5000/api/export", {
