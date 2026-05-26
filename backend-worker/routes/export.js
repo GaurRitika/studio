@@ -9,14 +9,17 @@ const router = express.Router();
  * @access  Public
  */
 router.post("/", async (req, res) => {
-  const { html, format = "png", fontUrl } = req.body;
+  const { html, htmls, format = "png", fontUrl } = req.body;
 
-  // 1. Validation check on required HTML markup
-  if (!html || typeof html !== "string" || html.trim().length === 0) {
+  // 1. Validation check on required HTML markup (either single html string or htmls array)
+  if ((!html || typeof html !== "string" || html.trim().length === 0) && (!htmls || !Array.isArray(htmls) || htmls.length === 0)) {
     return res.status(400).json({
-      error: "Renderable HTML markup is required to export slides.",
+      error: "Renderable HTML markup or an array of slide HTMLs is required to export slides.",
     });
   }
+
+  // Treat single html input as a single-element array internally
+  const activeHtmls = htmls && Array.isArray(htmls) ? htmls : [html];
 
   // 2. Fetch the warm shared Playwright browser instance from Express locals
   const browser = req.app.locals.browser;
@@ -26,15 +29,16 @@ router.post("/", async (req, res) => {
     });
   }
 
-  console.log(`📸 Export Request received: Capturing ${format.toUpperCase()} screenshot.`);
+  console.log(`📸 Export Request received: Capturing ${activeHtmls.length} slide(s) in ${format.toUpperCase()} format.`);
 
   let context = null;
   let page = null;
 
   try {
     // 3. Open a lightweight, sandboxed browser context (Tab isolation optimization)
+    // Adjusted viewport size to 1080x1350 (Premium 4:5 vertical aspect ratio) to prevent bottom CTA cutoff
     context = await browser.newContext({
-      viewport: { width: 1080, height: 1080 },
+      viewport: { width: 1080, height: 1350 },
       deviceScaleFactor: 2, // Retains high-fidelity sharpness for standard displays (2x retina)
     });
 
@@ -48,7 +52,183 @@ router.post("/", async (req, res) => {
          <link rel="stylesheet" href="${fontUrl}">`
       : "";
 
-    const fullHtml = `
+    const supabaseUrl = process.env.SUPABASE_URL;
+    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    const bucketName = process.env.SUPABASE_BUCKET_NAME || "carousel-exports";
+
+    // --- CASE A: MULTI-PAGE PDF GENERATION ---
+    if (format.toLowerCase() === "pdf" && activeHtmls.length > 1) {
+      const compiledSlides = activeHtmls.map(slideHtml => `
+        <div class="slide-page">
+          ${slideHtml}
+        </div>
+      `).join("\n");
+
+      const fullHtml = `
+        <!DOCTYPE html>
+        <html>
+          <head>
+            <meta charset="utf-8">
+            ${fontStyles}
+            <script src="https://cdn.tailwindcss.com"></script>
+            <style>
+              html, body {
+                margin: 0;
+                padding: 0;
+                width: 1080px;
+                background-color: transparent;
+              }
+              .slide-page {
+                width: 1080px;
+                height: 1350px;
+                page-break-after: always;
+                break-after: page;
+                position: relative;
+                overflow: hidden;
+                box-sizing: border-box;
+              }
+            </style>
+          </head>
+          <body>
+            ${compiledSlides}
+          </body>
+        </html>
+      `;
+
+      await page.setContent(fullHtml, { waitUntil: "networkidle" });
+      await page.evaluate(async () => {
+        await document.fonts.ready;
+      });
+
+      const buffer = await page.pdf({
+        width: "1080px",
+        height: "1350px",
+        printBackground: true,
+        margin: { top: 0, right: 0, bottom: 0, left: 0 }
+      });
+
+      console.log("✅ Multi-page PDF compiled successfully.");
+
+      if (supabaseUrl && supabaseKey) {
+        const fileName = `export_${Date.now()}_${Math.random().toString(36).substring(2, 7)}.pdf`;
+        const uploadUrl = `${supabaseUrl}/storage/v1/object/${bucketName}/${fileName}`;
+
+        try {
+          console.log("☁️ Supabase: Uploading PDF buffer via native REST client...");
+          const uploadResponse = await fetch(uploadUrl, {
+            method: "POST",
+            headers: {
+              "apikey": supabaseKey,
+              "Authorization": `Bearer ${supabaseKey}`,
+              "Content-Type": "application/pdf",
+              "x-upsert": "true"
+            },
+            body: buffer
+          });
+
+          if (uploadResponse.ok) {
+            const publicUrl = `${supabaseUrl}/storage/v1/object/public/${bucketName}/${fileName}`;
+            console.log(`☁️ Supabase: Export successfully uploaded to CDN: ${publicUrl}`);
+            
+            return res.json({
+              success: true,
+              fileUrl: publicUrl,
+              format: "pdf"
+            });
+          }
+        } catch (err) {
+          console.warn("⚠️ Supabase Storage upload failed. Streaming binary buffer instead.", err);
+        }
+      }
+
+      // Stream PDF directly as fallback
+      res.set("Content-Type", "application/pdf");
+      res.set("Content-Disposition", "attachment; filename=carousel-studio.pdf");
+      return res.send(buffer);
+    }
+
+    // --- CASE B: MULTI-IMAGE PNG GENERATION ---
+    if (format.toLowerCase() === "png" && activeHtmls.length > 1) {
+      const fileUrls = [];
+
+      for (let i = 0; i < activeHtmls.length; i++) {
+        const slideHtml = activeHtmls[i];
+        const singleHtml = `
+          <!DOCTYPE html>
+          <html>
+            <head>
+              <meta charset="utf-8">
+              ${fontStyles}
+              <script src="https://cdn.tailwindcss.com"></script>
+              <style>
+                html, body {
+                  margin: 0;
+                  padding: 0;
+                  width: 1080px;
+                  height: 1350px;
+                  overflow: hidden;
+                  background-color: transparent;
+                }
+              </style>
+            </head>
+            <body>
+              <div style="width: 1080px; height: 1350px; position: relative;">
+                ${slideHtml}
+              </div>
+            </body>
+          </html>
+        `;
+
+        await page.setContent(singleHtml, { waitUntil: "networkidle" });
+        await page.evaluate(async () => {
+          await document.fonts.ready;
+        });
+
+        const slideBuffer = await page.screenshot({
+          type: "png",
+          omitBackground: true,
+        });
+
+        if (supabaseUrl && supabaseKey) {
+          const fileName = `export_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 7)}.png`;
+          const uploadUrl = `${supabaseUrl}/storage/v1/object/${bucketName}/${fileName}`;
+
+          console.log(`☁️ Supabase: Uploading PNG slide ${i + 1}/${activeHtmls.length} via native REST client...`);
+          const uploadResponse = await fetch(uploadUrl, {
+            method: "POST",
+            headers: {
+              "apikey": supabaseKey,
+              "Authorization": `Bearer ${supabaseKey}`,
+              "Content-Type": "image/png",
+              "x-upsert": "true"
+            },
+            body: slideBuffer
+          });
+
+          if (uploadResponse.ok) {
+            const publicUrl = `${supabaseUrl}/storage/v1/object/public/${bucketName}/${fileName}`;
+            fileUrls.push(publicUrl);
+          } else {
+            const errorText = await uploadResponse.text();
+            throw new Error(`Supabase upload failed for slide ${i + 1}: ${errorText}`);
+          }
+        } else {
+          // Local fallback base64
+          const base64 = slideBuffer.toString("base64");
+          fileUrls.push(`data:image/png;base64,${base64}`);
+        }
+      }
+
+      console.log(`✅ All ${activeHtmls.length} PNGs compiled successfully.`);
+      return res.json({
+        success: true,
+        fileUrls: fileUrls,
+        format: "png"
+      });
+    }
+
+    // --- CASE C: SINGLE SLIDE PNG/PDF GENERATION (BACKWARDS COMPATIBILITY) ---
+    const singleHtml = `
       <!DOCTYPE html>
       <html>
         <head>
@@ -60,52 +240,41 @@ router.post("/", async (req, res) => {
               margin: 0;
               padding: 0;
               width: 1080px;
-              height: 1080px;
+              height: 1350px;
               overflow: hidden;
               background-color: transparent;
             }
           </style>
         </head>
         <body>
-          <div style="width: 1080px; height: 1080px; position: relative;">
-            ${html}
+          <div style="width: 1080px; height: 1350px; position: relative;">
+            ${activeHtmls[0]}
           </div>
         </body>
       </html>
     `;
 
-    // 5. Inject the content and wait for network assets to settle
-    await page.setContent(fullHtml, { waitUntil: "networkidle" });
-
-    // 6. Gotcha A: Wait for custom Google Fonts to load fully before screenshotting
-    // Prevents text falling back to standard Courier/Arial in headless Linux containers
+    await page.setContent(singleHtml, { waitUntil: "networkidle" });
     await page.evaluate(async () => {
       await document.fonts.ready;
     });
 
     let buffer;
     if (format.toLowerCase() === "pdf") {
-      // PDF layout sizing
       buffer = await page.pdf({
         width: "1080px",
-        height: "1080px",
+        height: "1350px",
         printBackground: true,
         margin: { top: 0, right: 0, bottom: 0, left: 0 }
       });
     } else {
-      // Standard sharp PNG export
       buffer = await page.screenshot({
         type: "png",
-        omitBackground: true, // Allows transparent overlays if design uses transparent gradients
+        omitBackground: true,
       });
     }
 
-    console.log("✅ Screenshot captured successfully.");
-
-    // 7. Check if Supabase keys are configured. If yes, upload to Storage Bucket (REST client)
-    const supabaseUrl = process.env.SUPABASE_URL;
-    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-    const bucketName = process.env.SUPABASE_BUCKET_NAME || "carousel-exports";
+    console.log("✅ Single slide captured successfully.");
 
     if (supabaseUrl && supabaseKey) {
       const fileExt = format.toLowerCase() === "pdf" ? "pdf" : "png";
@@ -113,7 +282,7 @@ router.post("/", async (req, res) => {
       const uploadUrl = `${supabaseUrl}/storage/v1/object/${bucketName}/${fileName}`;
 
       try {
-        console.log("☁️ Supabase: Uploading screenshot buffer via native REST client...");
+        console.log("☁️ Supabase: Uploading single screenshot buffer via REST client...");
         const uploadResponse = await fetch(uploadUrl, {
           method: "POST",
           headers: {
@@ -134,16 +303,13 @@ router.post("/", async (req, res) => {
             fileUrl: publicUrl,
             format: format
           });
-        } else {
-          const errorText = await uploadResponse.text();
-          console.warn("⚠️ Supabase Storage REST upload failed. Streaming binary buffer fallback. Details:", errorText);
         }
       } catch (supabaseError) {
-        console.error("🔴 Supabase Connection Failed. Streaming binary buffer fallback. Details:", supabaseError.message);
+        console.warn("⚠️ Supabase Storage REST upload failed. Streaming binary buffer fallback.");
       }
     }
 
-    // 8. Default Local Fallback: Stream binary buffer directly with download headers
+    // Default Local Fallback
     if (format.toLowerCase() === "pdf") {
       res.set("Content-Type", "application/pdf");
       res.set("Content-Disposition", "attachment; filename=carousel-slide.pdf");
@@ -161,7 +327,6 @@ router.post("/", async (req, res) => {
       error: "Headless render engine crashed while screenshotting slide layout.",
     });
   } finally {
-    // 7. Clean up browser tabs immediately to reclaim RAM memory (Scale optimization)
     if (page) await page.close();
     if (context) await context.close();
     console.log("🧹 Export context closed and garbage collected.");

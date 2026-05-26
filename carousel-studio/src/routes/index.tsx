@@ -155,7 +155,7 @@ function EditorPage() {
     setStatusMsg("Connecting to Gemini AI Engine...");
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 1500);
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
 
     try {
       const response = await fetch("http://localhost:5000/api/generate", {

@@ -102,7 +102,11 @@ export function ExportModal({ isOpen, onClose, slides, style, accent, watermark 
       setStatus("success");
     } catch (err: any) {
       console.error(err);
-      setErrorMessage(err.message || "An error occurred during PNG compilation.");
+      let errMsg = err.message || "An error occurred during PNG compilation.";
+      if (errMsg.toLowerCase().includes("oklch")) {
+        errMsg = "Your premium template uses modern Tailwind v4 OKLCH colors, which legacy client-side canvas renderers cannot parse. Please ensure your backend worker is running ('npm run dev' inside backend-worker) for high-fidelity Playwright captures.";
+      }
+      setErrorMessage(errMsg);
       setStatus("error");
     }
   };
@@ -156,7 +160,11 @@ export function ExportModal({ isOpen, onClose, slides, style, accent, watermark 
       pdf.save("carousel-studio.pdf");
     } catch (err: any) {
       console.error(err);
-      setErrorMessage(err.message || "An error occurred during PDF assembly.");
+      let errMsg = err.message || "An error occurred during PDF assembly.";
+      if (errMsg.toLowerCase().includes("oklch")) {
+        errMsg = "Your premium template uses modern Tailwind v4 OKLCH colors, which legacy client-side canvas renderers cannot parse. Please ensure your backend worker is running ('npm run dev' inside backend-worker) for high-fidelity Playwright captures.";
+      }
+      setErrorMessage(errMsg);
       setStatus("error");
     }
   };
@@ -164,61 +172,84 @@ export function ExportModal({ isOpen, onClose, slides, style, accent, watermark 
   const handleServerExport = async (format: "png" | "pdf") => {
     try {
       setStatus("rendering");
-      setProgress(0);
+      setProgress(10);
 
+      // Collect all slide HTML markups in a single loop
+      const htmls: string[] = [];
       for (let i = 0; i < slides.length; i++) {
-        setProgress(Math.round((i / slides.length) * 100));
-        
         const element = document.getElementById(`export-slide-target-${i}`);
-        if (!element) continue;
-
-        const slideHtml = element.innerHTML;
-
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 15000);
-
-        try {
-          const response = await fetch("http://localhost:5000/api/export", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            signal: controller.signal,
-            body: JSON.stringify({
-              html: slideHtml,
-              format: format,
-              fontUrl: style.font.includes("Space")
-                ? "https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap"
-                : "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
-            })
-          });
-
-          clearTimeout(timeoutId);
-
-          if (!response.ok) {
-            throw new Error("Server engine is offline.");
-          }
-
-          const contentType = response.headers.get("content-type");
-          if (contentType && contentType.includes("application/json")) {
-            const data = await response.json();
-            if (data.success && data.fileUrl) {
-              triggerDownload(data.fileUrl, `carousel-slide-${i + 1}.${format}`);
-            }
-          } else {
-            const blob = await response.blob();
-            const url = window.URL.createObjectURL(blob);
-            triggerDownload(url, `carousel-slide-${i + 1}.${format}`);
-            window.URL.revokeObjectURL(url);
-          }
-        } catch (fetchErr) {
-          clearTimeout(timeoutId);
-          throw fetchErr;
+        if (element) {
+          htmls.push(element.innerHTML);
         }
       }
 
-      setProgress(100);
-      setStatus("success");
+      if (htmls.length === 0) {
+        throw new Error("No slides found to compile.");
+      }
+
+      setProgress(30);
+
+      // Instantiated a single optimized 60-second AbortController timeout to safeguard backend operations
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 60000);
+
+      const fontUrl = style.font.includes("Space")
+        ? "https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap"
+        : "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap";
+
+      try {
+        const response = await fetch("http://localhost:5000/api/export", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: controller.signal,
+          body: JSON.stringify({
+            htmls,
+            format,
+            fontUrl
+          })
+        });
+
+        clearTimeout(timeoutId);
+        setProgress(70);
+
+        if (!response.ok) {
+          throw new Error("Server engine returned a failure status.");
+        }
+
+        const contentType = response.headers.get("content-type");
+        if (contentType && contentType.includes("application/json")) {
+          const data = await response.json();
+          if (data.success) {
+            if (format === "pdf" && data.fileUrl) {
+              triggerDownload(data.fileUrl, "carousel-studio.pdf");
+            } else if (format === "png" && Array.isArray(data.fileUrls)) {
+              data.fileUrls.forEach((url: string, idx: number) => {
+                triggerDownload(url, `carousel-slide-${idx + 1}.png`);
+              });
+            } else if (data.fileUrl) {
+              triggerDownload(data.fileUrl, `carousel-slide.${format}`);
+            } else {
+              throw new Error("Invalid output received from server engine.");
+            }
+          } else {
+            throw new Error(data.error || "Server failed to compile designs.");
+          }
+        } else {
+          // Direct binary fallback
+          const blob = await response.blob();
+          const url = window.URL.createObjectURL(blob);
+          triggerDownload(url, format === "pdf" ? "carousel-studio.pdf" : "carousel-slide.png");
+          window.URL.revokeObjectURL(url);
+        }
+
+        setProgress(100);
+        setStatus("success");
+      } catch (fetchErr: any) {
+        clearTimeout(timeoutId);
+        throw fetchErr;
+      }
     } catch (err: any) {
-      console.warn("⚠️ Playwright backend is offline. Running client-side canvas fallback...");
+      console.warn("⚠️ Playwright backend is offline. Running client-side canvas fallback...", err.message || err);
       if (format === "pdf") {
         await handleExportPDF();
       } else {
