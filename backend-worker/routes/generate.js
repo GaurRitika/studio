@@ -48,7 +48,13 @@ router.post("/", async (req, res) => {
   } catch (err) {
     console.error("🔴 Error in /api/generate handler:", err.message);
 
-    // Differentiate between API Key issue and general engine error
+    // Differentiate between Quota exceeded, API Key issue, and general engine error
+    if (err.message.includes("429") || err.message.toLowerCase().includes("quota")) {
+      return res.status(429).json({
+        error: "Your Gemini API Key has exceeded its free tier rate limits/quota. Carousel Studio is automatically running your local high-fidelity fallback engine to structure your slides! Start editing or check your billing details on Google AI Studio.",
+      });
+    }
+
     if (err.message.includes("API_KEY")) {
       return res.status(500).json({
         error: "Server configuration issue: Gemini API key is missing or invalid.",

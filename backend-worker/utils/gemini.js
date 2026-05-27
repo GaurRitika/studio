@@ -38,29 +38,42 @@ export async function generateStructuredSlides(rawText, inputType, slideCount = 
     maxBulletChars: constraints.maxBulletChars || 45,
   };
 
-  const prompt = `You are a strict text-structuring engine.
-Your task is to take the provided raw input text and organize/distribute it logically across exactly ${slideCount} slides to fit our visual templates.
+  const isKeyword = isKeywordInput(rawText) || inputType === "topic";
+  
+  const modeInstruction = isKeyword
+    ? `MODE: CREATIVE EXPANSION MODE (Short Input detected: "${rawText}")
+- The user has provided a brief keyword or topic.
+- You must act as an expert content creator, senior copywriter, and subject matter authority.
+- Do NOT restrict yourself to the input words! Use your vast internal world knowledge to write deep, valuable, high-impact educational content on this theme.
+- Brainstorm a highly viral hook, establish the core steps/concepts, design highly relevant industry statistics or quotes, and structure a complete high-value masterclass deck of exactly ${slideCount} slides.`
+    : `MODE: RICH ELABORATION & STRUCTURING MODE (Dense Input detected: "${rawText.slice(0, 100)}...")
+- The user has provided a detailed paragraph, tweet thread, or knowledge base.
+- Do NOT simply cut, paste, or summarize in fragments!
+- Synthesize, elaborate, and explain the core values deeply. Keep the content authentic to the user's ideas, but fully fleshed out.
+- Ensure every slide is packed with enough high-value, detailed, readable copy so the slide designs look rich and complete rather than empty or sparse.`;
 
-INPUT CONTENT TO STRUCTURE:
+  const prompt = `You are Carousel Studio AI, a world-class professional copywriter and design-focused content architect.
+Your task is to take the provided raw input text and structure it into exactly ${slideCount} premium, high-impact slide components.
+
+INPUT CONTENT:
 "${rawText}"
 
-DIRECTIONS:
-1. Do NOT fabricate new stories, external facts, or outside information. 
-2. ONLY summarize, distill, and structure the provided raw input text.
-3. Keep the content authentic to the user's ideas, but parsed into a professional copywriter format.
-4. Follow this rigid sequence:
-   - Slide 1: Must be a "hook" slide (derived directly from the main theme of the input).
-   - Slides 2 to ${slideCount - 1}: Main content slides. Mix slide kinds naturally ("bullets", "stat", "quote", "split") based *only* on facts and text present in the input.
-   - Slide ${slideCount} (Final Slide): Must be a "cta" slide (standard handle/call to action).
+${modeInstruction}
 
-Character & Limit Rules:
-1. Title / Header: Maximum ${c.maxTitleChars} characters.
-2. Body Description: Maximum ${c.maxBodyChars} characters.
-3. Bullet Lists (only for "bullets" slide kind): Maximum ${c.maxBullets} bullets, and each bullet must be maximum ${c.maxBulletChars} characters.
-4. Stat numbers (only for "stat" slide kind): Must be extremely short (e.g., "93%", "10x", "5M").
-5. Quotes (only for "quote" slide kind): Punchy quote with author attribution taken from the text.
+SLIDE SEQUENCE DIRECTIVES:
+1. Slide 1 (Hook Slide): Must be a highly clickable, high-converting headline (Hook) that grabs immediate attention. Include a compelling sub-topic tag or category in 'subtitle'.
+2. Slides 2 to ${slideCount - 1} (Content Slides): Distribute the key educational concepts or steps. Mix slide kinds naturally ("bullets", "stat", "quote", "split").
+3. Slide ${slideCount} (Final Slide): Must be a "cta" slide (Call to Action). Include standard handles/contacts in 'ctaItems' or support text in 'body'.
 
-Ensure ultra-concise, token-optimized, high-impact copywriting. Avoid corporate filler.`;
+CONTENT DENSITY & STYLE RULES:
+- Title / Header (Max ${c.maxTitleChars} chars): Make every title punchy, active, and benefit-driven.
+- Body Description (Max ${c.maxBodyChars} chars): Write rich, engaging support paragraphs. Do not write single-word placeholders.
+- Bullet Lists (Max ${c.maxBullets} bullets, Max ${c.maxBulletChars} chars each): Each bullet must be a complete, high-value takeaway thought (e.g. 6-12 words per bullet) rather than short fragments.
+- Stat Numbers (only for "stat" slide kind): Use a high-impact metric. If none is in the input, brainstorm a realistic estimated metric (e.g. "82%", "10x", "150M", "4.8B") and write a comprehensive support label explaining its significance.
+- Quotes (only for "quote" slide kind): Provide a memorable, inspiring pull quote. If none is present, formulate a premium quote matching the theme, and attribute it to a logical authority or generic title (e.g., "SaaS Founder", "Growth Advisor").
+- Split layout (only for "split" slide kind): Provide a detailed paragraph that fully explains a key concept.
+
+Structure the slides beautifully, ensuring premium, token-optimized, high-impact copywriting. Avoid corporate filler.`;
 
   // Enforce strict JSON Schema constraints using Gemini's native Type system
   const responseSchema = {
